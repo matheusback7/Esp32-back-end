@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="UTF-8" />
+<title>ESP32 DevKit1 - Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg: #0f172a;
+    --card: #1e293b;
+    --accent: #38bdf8;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --online: #22c55e;
+    --offline: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  #login-screen {
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .login-box {
+    background: var(--card);
+    padding: 2rem;
+    border-radius: 12px;
+    width: 320px;
+  }
+  .login-box h1 { font-size: 1.2rem; margin-bottom: 1.2rem; }
+  .login-box input {
+    width: 100%;
+    padding: 10px;
+    margin-bottom: 12px;
+    border-radius: 6px;
+    border: 1px solid #334155;
+    background: #0f172a;
+    color: var(--text);
+  }
+  .login-box button {
+    width: 100%;
+    padding: 10px;
+    border: none;
+    border-radius: 6px;
+    background: var(--accent);
+    color: #0f172a;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #error-msg { color: var(--offline); font-size: 0.85rem; margin-top: 8px; min-height: 1em; }
+  #app { display: none; padding: 24px; max-width: 900px; margin: 0 auto; }
+  header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+  header h1 { font-size: 1.3rem; }
+  #logout-btn { background: none; border: 1px solid #334155; color: var(--muted); padding: 6px 12px; border-radius: 6px; cursor: pointer; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+  .device-card { background: var(--card); border-radius: 10px; padding: 16px; }
+  .device-card h3 { margin: 0 0 8px; font-size: 1rem; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .dot.online { background: var(--online); }
+  .dot.offline { background: var(--offline); }
+  .reading { color: var(--muted); font-size: 0.85rem; margin: 4px 0; }
+  .reading b { color: var(--text); }
+  #empty { color: var(--muted); text-align: center; margin-top: 60px; }
+</style>
+</head>
+<body>
+
+<div id="login-screen">
+  <form class="login-box" id="login-form">
+    <h1>ESP32 DevKit1 — Login</h1>
+    <input type="text" id="username" placeholder="Usuário" autocomplete="username" required />
+    <input type="password" id="password" placeholder="Senha" autocomplete="current-password" required />
+    <button type="submit">Entrar</button>
+    <div id="error-msg"></div>
+  </form>
+</div>
+
+<div id="app">
+  <header>
+    <h1>Painel de Monitoramento</h1>
+    <button id="logout-btn">Sair</button>
+  </header>
+  <div id="empty">Nenhum dispositivo conectado ainda.</div>
+  <div class="grid" id="devices-grid"></div>
+</div>
+
+<script>
+let token = null;
+let ws = null;
+const devices = {};
+
+const loginForm = document.getElementById("login-form");
+const errorMsg = document.getElementById("error-msg");
+const loginScreen = document.getElementById("login-screen");
+const app = document.getElementById("app");
+const grid = document.getElementById("devices-grid");
+const empty = document.getElementById("empty");
+
+loginForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  errorMsg.textContent = "";
+  const username = document.getElementById("username").value;
+  const password = document.getElementById("password").value;
+
+  try {
+    const res = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      errorMsg.textContent = err.detail || "Falha no login";
+      return;
+    }
+    const data = await res.json();
+    token = data.access_token;
+    loginScreen.style.display = "none";
+    app.style.display = "block";
+    connectWebSocket();
+  } catch (err) {
+    errorMsg.textContent = "Erro de conexão com o servidor";
+  }
+});
+
+document.getElementById("logout-btn").addEventListener("click", () => {
+  if (ws) ws.close();
+  token = null;
+  app.style.display = "none";
+  loginScreen.style.display = "flex";
+});
+
+function connectWebSocket() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws/dashboard?token=${encodeURIComponent(token)}`);
+
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+
+    if (msg.type === "snapshot") {
+      Object.entries(msg.devices).forEach(([id, data]) => {
+        devices[id] = { data, status: "online" };
+      });
+      render();
+    }
+
+    if (msg.type === "reading") {
+      devices[msg.device_id] = { data: msg.data, status: "online" };
+      render();
+    }
+
+    if (msg.type === "device_status") {
+      if (!devices[msg.device_id]) devices[msg.device_id] = { data: {} };
+      devices[msg.device_id].status = msg.status;
+      render();
+    }
+  };
+
+  ws.onclose = () => {
+    // tenta reconectar em 3s se ainda estiver logado
+    if (token) setTimeout(connectWebSocket, 3000);
+  };
+}
+
+function render() {
+  const ids = Object.keys(devices);
+  empty.style.display = ids.length ? "none" : "block";
+  grid.innerHTML = ids
+    .map((id) => {
+      const d = devices[id];
+      const rows = Object.entries(d.data || {})
+        .filter(([k]) => k !== "timestamp")
+        .map(([k, v]) => `<div class="reading"><b>${k}:</b> ${v}</div>`)
+        .join("");
+      const time = d.data.timestamp ? new Date(d.data.timestamp).toLocaleTimeString() : "-";
+      return `
+        <div class="device-card">
+          <h3><span class="dot ${d.status || "offline"}"></span> ${id}</h3>
+          ${rows || '<div class="reading">Sem leituras ainda</div>'}
+          <div class="reading" style="margin-top:8px;opacity:0.6">Última atualização: ${time}</div>
+        </div>`;
+    })
+    .join("");
+}
+</script>
+</body>
+</html>
